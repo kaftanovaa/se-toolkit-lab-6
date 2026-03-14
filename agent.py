@@ -24,17 +24,26 @@ MAX_TOOL_CALLS = 10
 
 
 def load_env_files() -> None:
-    """Load environment variables from .env.agent.secret and .env.docker.secret."""
-    # Load LLM config from .env.agent.secret
+    """
+    Load environment variables from .env files if they exist.
+    
+    The autochecker injects variables directly, so these files are optional.
+    Local development uses .env.agent.secret and .env.docker.secret.
+    """
+    # Try to load from .env.agent.secret
     agent_env_file = Path(__file__).parent / ".env.agent.secret"
     if agent_env_file.exists():
         load_dotenv(agent_env_file)
     
-    # Load LMS API key from .env.docker.secret
+    # Try to load from .env.docker.secret (don't override existing vars)
     docker_env_file = Path(__file__).parent / ".env.docker.secret"
     if docker_env_file.exists():
-        # Load without overriding existing vars
         load_dotenv(docker_env_file, override=False)
+    
+    # Also try .env in project root (fallback)
+    env_file = Path(__file__).parent / ".env"
+    if env_file.exists():
+        load_dotenv(env_file, override=False)
 
 
 def get_llm_env_vars() -> dict[str, str]:
@@ -44,13 +53,13 @@ def get_llm_env_vars() -> dict[str, str]:
     model = os.getenv("LLM_MODEL")
 
     if not api_key:
-        print("Error: LLM_API_KEY not set", file=sys.stderr)
+        print("Error: LLM_API_KEY not set in environment", file=sys.stderr)
         sys.exit(1)
     if not api_base:
-        print("Error: LLM_API_BASE not set", file=sys.stderr)
+        print("Error: LLM_API_BASE not set in environment", file=sys.stderr)
         sys.exit(1)
     if not model:
-        print("Error: LLM_MODEL not set", file=sys.stderr)
+        print("Error: LLM_MODEL not set in environment", file=sys.stderr)
         sys.exit(1)
 
     return {
@@ -539,33 +548,49 @@ def smart_answer_question(
 def main() -> None:
     """Main entry point."""
     # Set stdout to UTF-8 for proper Unicode handling
-    import io
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-    
+    # This is needed for Windows; on Linux/VM it may already be UTF-8
+    try:
+        import io
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    except AttributeError:
+        # On some systems stdout.buffer doesn't exist; set encoding directly
+        import io
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace') if hasattr(sys.stdout, 'reconfigure') else None
+
     # Parse command-line arguments
     if len(sys.argv) < 2:
         print("Usage: uv run agent.py \"<question>\"", file=sys.stderr)
         sys.exit(1)
-    
+
     question = sys.argv[1]
     
+    # Debug: show received question
+    print(f"Received question: {question[:50]}...", file=sys.stderr)
+
     # Load environment
     load_env_files()
-    llm_env = get_llm_env_vars()
     
+    # Debug: show loaded env vars (without values)
+    print(f"LLM_API_KEY set: {bool(os.getenv('LLM_API_KEY'))}", file=sys.stderr)
+    print(f"LLM_API_BASE set: {bool(os.getenv('LLM_API_BASE'))}", file=sys.stderr)
+    print(f"LLM_MODEL set: {bool(os.getenv('LLM_MODEL'))}", file=sys.stderr)
+    print(f"LMS_API_KEY set: {bool(os.getenv('LMS_API_KEY'))}", file=sys.stderr)
+    
+    llm_env = get_llm_env_vars()
+
     # Answer question with tools
     answer, source, tool_calls = smart_answer_question(
         question=question,
         llm_env=llm_env,
     )
-    
+
     # Format output
     output = {
         "answer": answer,
         "source": source,
         "tool_calls": tool_calls,
     }
-    
+
     # Output JSON to stdout
     print(json.dumps(output, ensure_ascii=False, indent=None))
 
