@@ -557,6 +557,11 @@ def main() -> None:
         import io
         sys.stdout.reconfigure(encoding='utf-8', errors='replace') if hasattr(sys.stdout, 'reconfigure') else None
 
+    # Change to the directory where agent.py is located
+    # This ensures the agent works regardless of where it's called from
+    script_dir = Path(__file__).parent.resolve()
+    os.chdir(script_dir)
+    
     # Parse command-line arguments
     if len(sys.argv) < 2:
         print("Usage: uv run agent.py \"<question>\"", file=sys.stderr)
@@ -564,7 +569,8 @@ def main() -> None:
 
     question = sys.argv[1]
     
-    # Debug: show received question
+    # Debug: show received question and working directory
+    print(f"Working directory: {os.getcwd()}", file=sys.stderr)
     print(f"Received question: {question[:50]}...", file=sys.stderr)
 
     # Load environment
