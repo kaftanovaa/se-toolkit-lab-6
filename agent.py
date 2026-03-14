@@ -48,9 +48,9 @@ def load_env_files() -> None:
 
 def get_llm_env_vars() -> dict[str, str]:
     """Get required LLM environment variables."""
-    api_key = os.getenv("LLM_API_KEY")
-    api_base = os.getenv("LLM_API_BASE")
-    model = os.getenv("LLM_MODEL")
+    api_key = os.getenv("LLM_API_KEY", "").strip()
+    api_base = os.getenv("LLM_API_BASE", "").strip()
+    model = os.getenv("LLM_MODEL", "").strip()
 
     if not api_key:
         print("Error: LLM_API_KEY not set in environment", file=sys.stderr)
@@ -71,13 +71,13 @@ def get_llm_env_vars() -> dict[str, str]:
 
 def get_api_env_vars() -> dict[str, str]:
     """Get API tool environment variables."""
-    lms_api_key = os.getenv("LMS_API_KEY")
-    agent_api_base_url = os.getenv("AGENT_API_BASE_URL", "http://localhost:42002")
-    
+    lms_api_key = os.getenv("LMS_API_KEY", "").strip()
+    agent_api_base_url = os.getenv("AGENT_API_BASE_URL", "http://localhost:42002").strip()
+
     if not lms_api_key:
         print("Error: LMS_API_KEY not set", file=sys.stderr)
         sys.exit(1)
-    
+
     return {
         "lms_api_key": lms_api_key,
         "agent_api_base_url": agent_api_base_url,
