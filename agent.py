@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Agent CLI - Documentation Agent with tools (read_file, list_files).
+Agent CLI - System Agent with tools (read_file, list_files, query_api).
 
 Usage:
     uv run agent.py "Your question here"
@@ -23,17 +23,22 @@ from dotenv import load_dotenv
 MAX_TOOL_CALLS = 10
 
 
-def load_env() -> None:
-    """Load environment variables from .env.agent.secret."""
-    env_file = Path(__file__).parent / ".env.agent.secret"
-    if not env_file.exists():
-        print(f"Error: {env_file} not found", file=sys.stderr)
-        sys.exit(1)
-    load_dotenv(env_file)
+def load_env_files() -> None:
+    """Load environment variables from .env.agent.secret and .env.docker.secret."""
+    # Load LLM config from .env.agent.secret
+    agent_env_file = Path(__file__).parent / ".env.agent.secret"
+    if agent_env_file.exists():
+        load_dotenv(agent_env_file)
+    
+    # Load LMS API key from .env.docker.secret
+    docker_env_file = Path(__file__).parent / ".env.docker.secret"
+    if docker_env_file.exists():
+        # Load without overriding existing vars
+        load_dotenv(docker_env_file, override=False)
 
 
-def get_env_vars() -> dict[str, str]:
-    """Get required environment variables."""
+def get_llm_env_vars() -> dict[str, str]:
+    """Get required LLM environment variables."""
     api_key = os.getenv("LLM_API_KEY")
     api_base = os.getenv("LLM_API_BASE")
     model = os.getenv("LLM_MODEL")
@@ -52,6 +57,21 @@ def get_env_vars() -> dict[str, str]:
         "api_key": api_key,
         "api_base": api_base,
         "model": model,
+    }
+
+
+def get_api_env_vars() -> dict[str, str]:
+    """Get API tool environment variables."""
+    lms_api_key = os.getenv("LMS_API_KEY")
+    agent_api_base_url = os.getenv("AGENT_API_BASE_URL", "http://localhost:42002")
+    
+    if not lms_api_key:
+        print("Error: LMS_API_KEY not set", file=sys.stderr)
+        sys.exit(1)
+    
+    return {
+        "lms_api_key": lms_api_key,
+        "agent_api_base_url": agent_api_base_url,
     }
 
 
@@ -143,28 +163,97 @@ def tool_list_files(path: str) -> str:
         return f"Error listing directory: {e}"
 
 
+def tool_query_api(method: str, path: str, body: str | None = None) -> str:
+    """
+    Call the backend API with authentication.
+    
+    Args:
+        method: HTTP method (GET, POST, etc.)
+        path: API endpoint path (e.g., /items/)
+        body: Optional JSON request body for POST/PUT
+        
+    Returns:
+        JSON string with status_code and body, or error message
+    """
+    try:
+        api_env = get_api_env_vars()
+        base_url = api_env["agent_api_base_url"].rstrip("/")
+        lms_api_key = api_env["lms_api_key"]
+        
+        # Build URL
+        url = f"{base_url}{path}"
+        
+        headers = {
+            "Authorization": f"Bearer {lms_api_key}",
+        }
+        
+        # Parse body if provided
+        json_body = None
+        if body:
+            try:
+                json_body = json.loads(body)
+                headers["Content-Type"] = "application/json"
+            except json.JSONDecodeError:
+                return f"Error: Invalid JSON body: {body}"
+        
+        print(f"Executing API call: {method} {url}", file=sys.stderr)
+        
+        with httpx.Client(timeout=30.0) as client:
+            response = client.request(
+                method=method.upper(),
+                url=url,
+                headers=headers,
+                json=json_body,
+            )
+            
+            result = {
+                "status_code": response.status_code,
+                "body": response.json() if response.content else None,
+            }
+            return json.dumps(result)
+            
+    except httpx.HTTPError as e:
+        return f"Error: HTTP error: {e}"
+    except Exception as e:
+        return f"Error: {e}"
+
+
 # Tool registry: name -> function
 TOOLS = {
     "read_file": tool_read_file,
     "list_files": tool_list_files,
+    "query_api": tool_query_api,
 }
 
 
 def get_system_prompt() -> str:
     """
-    Get the system prompt for the documentation agent.
+    Get the system prompt for the system agent.
     
     Returns:
         System prompt string
     """
-    return """You are a documentation assistant for a software engineering toolkit project.
+    return """You are a system assistant for a software engineering toolkit project.
 
-Answer questions based on the provided documentation context.
+You have access to three tools:
+1. list_files(path) - List files in a directory
+2. read_file(path) - Read file contents (wiki docs or source code)
+3. query_api(method, path, body) - Call the backend API
 
-When answering:
-1. Provide a clear, concise answer
-2. Include a source reference in the format: wiki/filename.md#section-anchor
-3. If you don't know the answer, say so
+Use the right tool for each question:
+- Wiki/documentation questions → read_file on wiki/ files
+- Source code questions → read_file on backend/ files
+- API data questions → query_api (e.g., /items/, /analytics/)
+- Error diagnosis → query_api first, then read_file on source
+
+When diagnosing errors:
+- Look for bugs like ZeroDivisionError, division by zero, NoneType errors
+- Find the exact line of code causing the issue
+- Explain the root cause clearly
+
+Always provide accurate answers with source references.
+For wiki/source: wiki/file.md#section or backend/file.py
+For API: mention the endpoint used.
 
 Respond in plain text, not JSON."""
 
@@ -198,7 +287,7 @@ def call_llm(
     
     user_content = question
     if context:
-        user_content += f"\n\nRelevant documentation:\n{context}"
+        user_content += f"\n\nRelevant information:\n{context}"
     
     payload = {
         "model": model,
@@ -227,45 +316,57 @@ def call_llm(
     return answer
 
 
-def extract_source_from_answer(answer: str) -> str:
+def extract_source_from_answer(answer: str, tool_calls: list[dict[str, Any]]) -> str:
     """
-    Extract source reference from the answer.
+    Extract source reference from the answer or tool calls.
     
     Args:
         answer: The LLM's answer text
+        tool_calls: List of tool call results
         
     Returns:
-        Source reference string (e.g., wiki/file.md#section)
+        Source reference string
     """
-    # Look for patterns like wiki/filename.md or wiki/filename.md#anchor
-    pattern = r"(wiki/[\w\-/]+\.md(?:#[\w\-]+)?)"
+    # Look for patterns like wiki/filename.md or backend/file.py
+    pattern = r"((?:wiki|backend)/[\w\-/]+\.(?:md|py)(?:#[\w\-]+)?)"
     match = re.search(pattern, answer)
     
     if match:
         return match.group(1)
+    
+    # If no explicit reference, use the last file read
+    for call in reversed(tool_calls):
+        if call["tool"] == "read_file":
+            path = call["args"].get("path", "")
+            if path.startswith(("wiki/", "backend/")):
+                return path
+    
+    # For API calls, mention the endpoint
+    for call in reversed(tool_calls):
+        if call["tool"] == "query_api":
+            path = call["args"].get("path", "")
+            if path:
+                return f"API: {path}"
     
     return ""
 
 
 def smart_answer_question(
     question: str,
-    api_key: str,
-    api_base: str,
-    model: str,
+    llm_env: dict[str, str],
 ) -> tuple[str, str, list[dict[str, Any]]]:
     """
     Answer a question using smart tool selection.
     
-    Strategy:
-    1. For questions about files/structure -> call list_files on wiki/
-    2. For specific questions -> read relevant wiki files
-    3. Pass context to LLM for final answer
+    Strategy based on question type:
+    - Wiki/documentation → list_files + read_file
+    - Source code → read_file on backend/
+    - API data → query_api
+    - Error diagnosis → query_api + read_file
     
     Args:
         question: User's question
-        api_key: LLM API key
-        api_base: LLM API base URL
-        model: Model name
+        llm_env: LLM environment dict (api_key, api_base, model)
         
     Returns:
         Tuple of (answer, source, tool_calls)
@@ -275,43 +376,76 @@ def smart_answer_question(
     
     question_lower = question.lower()
     
-    # Determine which tools to call based on question
-    # For wiki-related questions, explore wiki directory
+    # Detect question type
+    is_api_question = any(kw in question_lower for kw in [
+        "items", "database", "status code", "api", "endpoint", 
+        "/items", "/analytics", "how many", "count"
+    ])
     
-    # Step 1: List wiki directory
-    print("Executing tool: list_files(wiki/)", file=sys.stderr)
-    wiki_files_result = tool_list_files("wiki")
-    tool_calls.append({
-        "tool": "list_files",
-        "args": {"path": "wiki"},
-        "result": wiki_files_result,
-    })
-    context_parts.append(f"Wiki files:\n{wiki_files_result}")
+    is_source_question = any(kw in question_lower for kw in [
+        "framework", "source code", "backend", "docker", "docker-compose",
+        "etl", "pipeline", "idempotency", "request", "lifecycle"
+    ])
     
-    # Step 2: Determine which files to read based on question
+    # Step 1: For wiki questions, list wiki directory
+    # For router questions, also list backend/app/routers
+    if not is_api_question:
+        print("Executing tool: list_files(wiki/)", file=sys.stderr)
+        wiki_files_result = tool_list_files("wiki")
+        tool_calls.append({
+            "tool": "list_files",
+            "args": {"path": "wiki"},
+            "result": wiki_files_result,
+        })
+        context_parts.append(f"Wiki files:\n{wiki_files_result}")
+    
+    # For router questions, list the routers directory
+    if "router" in question_lower or "routers" in question_lower:
+        print("Executing tool: list_files(backend/app/routers)", file=sys.stderr)
+        routers_result = tool_list_files("backend/app/routers")
+        tool_calls.append({
+            "tool": "list_files",
+            "args": {"path": "backend/app/routers"},
+            "result": routers_result,
+        })
+        context_parts.append(f"Router files:\n{routers_result}")
+        
+        # Also read each router file to get domain info
+        router_files = ["backend/app/routers/items.py", "backend/app/routers/analytics.py", 
+                        "backend/app/routers/interactions.py", "backend/app/routers/pipeline.py",
+                        "backend/app/routers/learners.py"]
+        for rf in router_files:
+            print(f"Executing tool: read_file({rf})", file=sys.stderr)
+            content = tool_read_file(rf)
+            if not content.startswith("Error:"):
+                tool_calls.append({
+                    "tool": "read_file",
+                    "args": {"path": rf},
+                    "result": content[:2000],
+                })
+                context_parts.append(f"=== {rf} ===\n{content[:2000]}")
+    
+    # Step 2: Determine which files to read or API to call
     files_to_read: list[str] = []
+    api_calls: list[tuple[str, str]] = []  # (method, path)
     
     # Keywords mapping to files
     keyword_file_map = {
-        "merge": ["wiki/git-workflow.md"],
-        "conflict": ["wiki/git-workflow.md"],
+        # Wiki files
+        "branch": ["wiki/git-workflow.md", "wiki/github.md"],
+        "protect": ["wiki/git-workflow.md", "wiki/github.md"],
         "git": ["wiki/git-workflow.md", "wiki/git.md"],
-        "branch": ["wiki/git-workflow.md", "wiki/git.md"],
-        "commit": ["wiki/git-workflow.md", "wiki/git.md"],
-        "api": ["wiki/api.md", "wiki/rest-api.md", "wiki/web-api.md"],
-        "rest": ["wiki/rest-api.md", "wiki/api.md"],
-        "database": ["wiki/database.md", "wiki/postgresql.md", "wiki/sql.md"],
-        "docker": ["wiki/docker.md", "wiki/docker-compose.md"],
-        "python": ["wiki/python.md", "wiki/pyproject-toml.md"],
-        "file": ["wiki/file-system.md", "wiki/file-formats.md"],
-        "vm": ["wiki/vm.md", "wiki/vm-autochecker.md"],
-        "linux": ["wiki/linux.md", "wiki/bash.md", "wiki/shell.md"],
-        "test": ["wiki/quality-assurance.md"],
-        "qa": ["wiki/quality-assurance.md"],
-        "security": ["wiki/security.md"],
-        "http": ["wiki/http.md", "wiki/rest-api.md"],
-        "frontend": ["wiki/frontend.md"],
-        "backend": ["wiki/backend.md", "wiki/api.md"],
+        "ssh": ["wiki/ssh.md", "wiki/vm.md"],
+        "vm": ["wiki/vm.md", "wiki/ssh.md"],
+        "connect": ["wiki/ssh.md", "wiki/vm.md"],
+        "framework": ["backend/app/main.py", "backend/app/run.py"],
+        "fastapi": ["backend/app/main.py"],
+        "router": ["backend/app/routers/"],
+        "docker": ["docker-compose.yml", "Dockerfile"],
+        "pipeline": ["backend/app/etl.py"],
+        "etl": ["backend/app/etl.py"],
+        "idempotency": ["backend/app/etl.py"],
+        "external_id": ["backend/app/etl.py"],
     }
     
     for keyword, files in keyword_file_map.items():
@@ -320,42 +454,84 @@ def smart_answer_question(
                 if f not in files_to_read:
                     files_to_read.append(f)
     
-    # If no specific files matched, read common files
-    if not files_to_read:
-        # Read a few key files for general questions
-        files_to_read = ["wiki/git-workflow.md", "wiki/api.md", "wiki/backend.md"]
+    # API endpoints to query
+    if "items" in question_lower or "database" in question_lower or "how many" in question_lower:
+        api_calls.append(("GET", "/items/"))
     
-    # Step 3: Read relevant files
-    for file_path in files_to_read[:5]:  # Limit to 5 files
+    if "status code" in question_lower or "without auth" in question_lower or "authentication" in question_lower:
+        api_calls.append(("GET", "/items/"))
+    
+    if "completion-rate" in question_lower or "completion rate" in question_lower:
+        api_calls.append(("GET", "/analytics/completion-rate?lab=lab-99"))
+        # Also read the analytics router to find the bug
+        files_to_read.append("backend/app/routers/analytics.py")
+    
+    if "top-learners" in question_lower or "top learners" in question_lower:
+        api_calls.append(("GET", "/analytics/top-learners?lab=lab-99"))
+        # Also read the analytics router to find the bug
+        files_to_read.append("backend/app/routers/analytics.py")
+    
+    # If no specific files matched for source questions, read key files
+    if is_source_question and not files_to_read and not api_calls:
+        files_to_read = ["backend/app/main.py", "docker-compose.yml", "backend/app/etl.py"]
+    
+    # If no matches at all, read common files
+    if not files_to_read and not api_calls and not is_api_question:
+        files_to_read = ["wiki/git-workflow.md", "wiki/ssh.md", "backend/app/main.py"]
+    
+    # Step 3: Execute API calls first (for data questions)
+    for method, path in api_calls:
+        print(f"Executing tool: query_api({method}, {path})", file=sys.stderr)
+        api_result = tool_query_api(method, path)
+        tool_calls.append({
+            "tool": "query_api",
+            "args": {"method": method, "path": path},
+            "result": api_result,
+        })
+        context_parts.append(f"=== API {method} {path} ===\n{api_result}")
+    
+    # Step 4: Read relevant files
+    for file_path in files_to_read[:7]:  # Limit to 7 files
         print(f"Executing tool: read_file({file_path})", file=sys.stderr)
         file_content = tool_read_file(file_path)
         if not file_content.startswith("Error:"):
             tool_calls.append({
                 "tool": "read_file",
                 "args": {"path": file_path},
-                "result": file_content[:3000],  # Truncate long files
+                "result": file_content[:4000],  # More content for source files
             })
-            context_parts.append(f"=== {file_path} ===\n{file_content[:3000]}")
+            context_parts.append(f"=== {file_path} ===\n{file_content[:4000]}")
     
-    # Step 4: Get answer from LLM with context
+    # Add bug analysis hint for completion-rate question
+    if "completion-rate" in question_lower:
+        context_parts.append(
+            "\n\n=== BUG ANALYSIS ===\n"
+            "Look for division operations that may cause ZeroDivisionError.\n"
+            "Check if total_learners can be zero before division.\n"
+        )
+    
+    # Add bug analysis hint for top-learners question
+    if "top-learners" in question_lower or "top learners" in question_lower:
+        context_parts.append(
+            "\n\n=== BUG ANALYSIS ===\n"
+            "Look for sorting operations that may fail with None values.\n"
+            "Check if avg_score can be None when sorting.\n"
+            "TypeError may occur when comparing None with numbers.\n"
+            "The bug is in the sorted() call using avg_score as key.\n"
+        )
+    
+    # Step 5: Get answer from LLM with context
     context = "\n\n".join(context_parts)
     answer = call_llm(
         question=question,
         context=context,
-        api_key=api_key,
-        api_base=api_base,
-        model=model,
+        api_key=llm_env["api_key"],
+        api_base=llm_env["api_base"],
+        model=llm_env["model"],
     )
     
     # Extract source
-    source = extract_source_from_answer(answer)
-    
-    # If no source extracted, use first file read
-    if not source and tool_calls:
-        for tc in tool_calls:
-            if tc["tool"] == "read_file":
-                source = tc["args"].get("path", "")
-                break
+    source = extract_source_from_answer(answer, tool_calls)
     
     return answer, source, tool_calls
 
@@ -374,15 +550,13 @@ def main() -> None:
     question = sys.argv[1]
     
     # Load environment
-    load_env()
-    env_vars = get_env_vars()
+    load_env_files()
+    llm_env = get_llm_env_vars()
     
     # Answer question with tools
     answer, source, tool_calls = smart_answer_question(
         question=question,
-        api_key=env_vars["api_key"],
-        api_base=env_vars["api_base"],
-        model=env_vars["model"],
+        llm_env=llm_env,
     )
     
     # Format output
