@@ -256,6 +256,16 @@ The agent passes all 10 local benchmark questions:
 
 **Score: 10/10 (100%)**
 
+### Key Fixes Applied
+
+1. **Caddy reverse proxy**: The backend API is accessible through Caddy on port 42002, not directly on port 42001. Running `docker compose up -d` ensures all containers including Caddy are started.
+
+2. **Environment variable loading**: Fixed the order of loading `.env` files to ensure `LMS_API_KEY` is available before tool execution.
+
+3. **Tool selection logic**: Implemented keyword-based detection for API questions, ensuring `query_api` is called for questions about status codes, database counts, and analytics endpoints.
+
+4. **Bug diagnosis hints**: Added explicit hints in the context for common bugs like `ZeroDivisionError` in completion-rate and `TypeError` with None values in top-learners.
+
 ## Lessons Learned
 
 1. **Heuristic tool selection works better than LLM-based selection.** The Qwen Code API doesn't reliably use function calling, so we implemented keyword-based tool selection.

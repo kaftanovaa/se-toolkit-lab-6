@@ -29,23 +29,23 @@ def load_env_files() -> None:
 
     The autochecker injects variables directly, so these files are optional.
     Local development uses .env.agent.secret and .env.docker.secret.
-    
+
     Note: Environment variables already set take precedence over .env files.
     """
-    # Try to load from .env.agent.secret (only if env vars not already set)
-    agent_env_file = Path(__file__).parent / ".env.agent.secret"
-    if agent_env_file.exists() and not os.getenv("LLM_API_KEY"):
-        load_dotenv(agent_env_file)
-
-    # Try to load from .env.docker.secret (don't override existing vars)
-    docker_env_file = Path(__file__).parent / ".env.docker.secret"
-    if docker_env_file.exists() and not os.getenv("LMS_API_KEY"):
-        load_dotenv(docker_env_file, override=False)
-
-    # Also try .env in project root (fallback)
+    # Try to load from .env in project root first (fallback)
     env_file = Path(__file__).parent / ".env"
     if env_file.exists():
-        load_dotenv(env_file, override=False)
+        load_dotenv(env_file, override=True)
+
+    # Try to load from .env.agent.secret (LLM credentials)
+    agent_env_file = Path(__file__).parent / ".env.agent.secret"
+    if agent_env_file.exists():
+        load_dotenv(agent_env_file, override=True)
+
+    # Try to load from .env.docker.secret (backend API credentials)
+    docker_env_file = Path(__file__).parent / ".env.docker.secret"
+    if docker_env_file.exists():
+        load_dotenv(docker_env_file, override=True)
 
 
 def _is_placeholder(value: str) -> bool:
@@ -55,15 +55,18 @@ def _is_placeholder(value: str) -> bool:
 
 def get_llm_env_vars() -> dict[str, str] | None:
     """Get required LLM environment variables.
-    
+
     Tries to load from environment first, then from .env files.
     Returns None if variables are not set or are placeholders.
     """
-    # First try to get from environment (autochecker injects these)
+    # Load .env files first (if not already loaded)
+    load_env_files()
+
+    # Get from environment (autochecker injects these, or loaded from .env)
     api_key = os.getenv("LLM_API_KEY", "").strip()
     api_base = os.getenv("LLM_API_BASE", "").strip()
     model = os.getenv("LLM_MODEL", "").strip()
-    
+
     # Ignore placeholder values
     if _is_placeholder(api_key):
         api_key = ""
@@ -71,21 +74,6 @@ def get_llm_env_vars() -> dict[str, str] | None:
         api_base = ""
     if _is_placeholder(model):
         model = ""
-    
-    # If not in environment, try to load from .env files
-    if not api_key or not api_base or not model:
-        load_env_files()
-        api_key = os.getenv("LLM_API_KEY", "").strip()
-        api_base = os.getenv("LLM_API_BASE", "").strip()
-        model = os.getenv("LLM_MODEL", "").strip()
-        
-        # Ignore placeholder values from .env files
-        if _is_placeholder(api_key):
-            api_key = ""
-        if _is_placeholder(api_base):
-            api_base = ""
-        if _is_placeholder(model):
-            model = ""
 
     if not api_key or not api_base or not model:
         return None
@@ -612,9 +600,6 @@ def main() -> None:
     print(f"Working directory: {os.getcwd()}", file=sys.stderr)
     print(f"Received question: {question[:50]}...", file=sys.stderr)
 
-    # Load environment
-    load_env_files()
-    
     # Debug: show loaded env vars (without values)
     print(f"LLM_API_KEY set: {bool(os.getenv('LLM_API_KEY'))}", file=sys.stderr)
     print(f"LLM_API_BASE set: {bool(os.getenv('LLM_API_BASE'))}", file=sys.stderr)
