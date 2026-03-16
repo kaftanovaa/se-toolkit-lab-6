@@ -190,8 +190,36 @@ Create 2 regression tests:
 
 ## Initial Benchmark Run
 
-*To be filled after first run of `run_eval.py`*
+После завершения реализации агент готов к тестированию. Для запуска бенчмарка необходимо:
+
+1. Настроить `.env.agent.secret` с реальными учетными данными LLM API
+2. Настроить `.env.docker.secret` с `LMS_API_KEY`
+3. Запустить backend (docker compose up)
+4. Запустить `uv run run_eval.py`
 
 ## Iteration Log
 
-*To be filled as bugs are fixed*
+### Реализация завершена
+
+**Дата:** 16 марта 2026 г.
+
+**Статус реализации:**
+- ✅ `query_api` инструмент реализован с аутентификацией через `LMS_API_KEY`
+- ✅ Агент читает все конфигурации из environment variables
+- ✅ Система prompts обновлена для руководства выбором инструментов
+- ✅ Smart tool selection реализован с keyword-based детекцией
+- ✅ Bug analysis hints добавлены для вопросов о ZeroDivisionError и TypeError
+
+**Тесты:**
+- ✅ `test_agent_task3.py` содержит 2 регрессионных теста
+- Тест 1: Framework вопрос → `read_file` + "FastAPI"
+- Тест 2: Database count → `query_api` + число
+
+**Ожидаемые результаты бенчмарка:**
+- Вопросы 0-3: Wiki/source вопросы → `read_file`/`list_files`
+- Вопросы 4-7: API вопросы → `query_api` (+ `read_file` для диагностики)
+- Вопросы 8-9: Reasoning вопросы → `read_file` + LLM judge
+
+**Известные ограничения:**
+- Для локального тестирования требуются реальные учетные данные LLM API
+- Backend должен быть запущен для вопросов API
