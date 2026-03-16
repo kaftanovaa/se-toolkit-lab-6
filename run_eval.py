@@ -34,7 +34,7 @@ from pathlib import Path
 
 def _load_env():
     """Load variables from .env file (simple key=value parser)."""
-    for env_file in [".env", ".env.docker.secret"]:
+    for env_file in [".env", ".env.docker.secret", ".env.agent.secret"]:
         path = Path(env_file)
         if not path.exists():
             continue
@@ -95,12 +95,16 @@ def _fetch_question(api_url: str, auth: str, lab: str, index: int):
 
 def _run_agent(question: str, timeout: int = 60):
     """Run agent.py with the question. Returns (answer_dict, error_msg)."""
+    # Pass current environment to the agent
+    env = os.environ.copy()
+    
     try:
         result = subprocess.run(
             [sys.executable, "agent.py", question],
             capture_output=True,
             text=True,
             timeout=timeout,
+            env=env,
         )
     except subprocess.TimeoutExpired:
         return None, "Agent timed out (60s)"

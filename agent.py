@@ -26,20 +26,22 @@ MAX_TOOL_CALLS = 10
 def load_env_files() -> None:
     """
     Load environment variables from .env files if they exist.
-    
+
     The autochecker injects variables directly, so these files are optional.
     Local development uses .env.agent.secret and .env.docker.secret.
-    """
-    # Try to load from .env.agent.secret
-    agent_env_file = Path(__file__).parent / ".env.agent.secret"
-    if agent_env_file.exists():
-        load_dotenv(agent_env_file)
     
+    Note: Environment variables already set take precedence over .env files.
+    """
+    # Try to load from .env.agent.secret (only if env vars not already set)
+    agent_env_file = Path(__file__).parent / ".env.agent.secret"
+    if agent_env_file.exists() and not os.getenv("LLM_API_KEY"):
+        load_dotenv(agent_env_file)
+
     # Try to load from .env.docker.secret (don't override existing vars)
     docker_env_file = Path(__file__).parent / ".env.docker.secret"
-    if docker_env_file.exists():
+    if docker_env_file.exists() and not os.getenv("LMS_API_KEY"):
         load_dotenv(docker_env_file, override=False)
-    
+
     # Also try .env in project root (fallback)
     env_file = Path(__file__).parent / ".env"
     if env_file.exists():
@@ -47,10 +49,21 @@ def load_env_files() -> None:
 
 
 def get_llm_env_vars() -> dict[str, str]:
-    """Get required LLM environment variables."""
+    """Get required LLM environment variables.
+    
+    Tries to load from environment first, then from .env files.
+    """
+    # First try to get from environment (autochecker injects these)
     api_key = os.getenv("LLM_API_KEY", "").strip()
     api_base = os.getenv("LLM_API_BASE", "").strip()
     model = os.getenv("LLM_MODEL", "").strip()
+    
+    # If not in environment, try to load from .env files
+    if not api_key or not api_base or not model:
+        load_env_files()
+        api_key = os.getenv("LLM_API_KEY", "").strip()
+        api_base = os.getenv("LLM_API_BASE", "").strip()
+        model = os.getenv("LLM_MODEL", "").strip()
 
     if not api_key:
         print("Error: LLM_API_KEY not set in environment", file=sys.stderr)
@@ -69,17 +82,17 @@ def get_llm_env_vars() -> dict[str, str]:
     }
 
 
-def get_api_env_vars() -> dict[str, str]:
-    """Get API tool environment variables."""
+def get_api_env_vars() -> dict[str, str | None]:
+    """Get API tool environment variables.
+    
+    Returns None for lms_api_key if not set — the caller should handle this.
+    This allows the agent to work for wiki/source questions without API access.
+    """
     lms_api_key = os.getenv("LMS_API_KEY", "").strip()
     agent_api_base_url = os.getenv("AGENT_API_BASE_URL", "http://localhost:42002").strip()
 
-    if not lms_api_key:
-        print("Error: LMS_API_KEY not set", file=sys.stderr)
-        sys.exit(1)
-
     return {
-        "lms_api_key": lms_api_key,
+        "lms_api_key": lms_api_key if lms_api_key else None,
         "agent_api_base_url": agent_api_base_url,
     }
 
@@ -175,27 +188,31 @@ def tool_list_files(path: str) -> str:
 def tool_query_api(method: str, path: str, body: str | None = None) -> str:
     """
     Call the backend API with authentication.
-    
+
     Args:
         method: HTTP method (GET, POST, etc.)
         path: API endpoint path (e.g., /items/)
         body: Optional JSON request body for POST/PUT
-        
+
     Returns:
         JSON string with status_code and body, or error message
     """
     try:
         api_env = get_api_env_vars()
         base_url = api_env["agent_api_base_url"].rstrip("/")
-        lms_api_key = api_env["lms_api_key"]
-        
+        lms_api_key = api_env.get("lms_api_key")
+
+        # Check if API key is available
+        if not lms_api_key:
+            return "Error: LMS_API_KEY not set in environment"
+
         # Build URL
         url = f"{base_url}{path}"
-        
+
         headers = {
             "Authorization": f"Bearer {lms_api_key}",
         }
-        
+
         # Parse body if provided
         json_body = None
         if body:
@@ -204,9 +221,9 @@ def tool_query_api(method: str, path: str, body: str | None = None) -> str:
                 headers["Content-Type"] = "application/json"
             except json.JSONDecodeError:
                 return f"Error: Invalid JSON body: {body}"
-        
+
         print(f"Executing API call: {method} {url}", file=sys.stderr)
-        
+
         with httpx.Client(timeout=30.0) as client:
             response = client.request(
                 method=method.upper(),
@@ -214,13 +231,13 @@ def tool_query_api(method: str, path: str, body: str | None = None) -> str:
                 headers=headers,
                 json=json_body,
             )
-            
+
             result = {
                 "status_code": response.status_code,
                 "body": response.json() if response.content else None,
             }
             return json.dumps(result)
-            
+
     except httpx.HTTPError as e:
         return f"Error: HTTP error: {e}"
     except Exception as e:
