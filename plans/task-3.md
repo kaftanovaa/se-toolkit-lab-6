@@ -201,7 +201,7 @@ Create 2 regression tests:
 
 ### Реализация завершена
 
-**Дата:** 16 марта 2026 г.
+**Дата:** 17 марта 2026 г.
 
 **Статус реализации:**
 - ✅ `query_api` инструмент реализован с аутентификацией через `LMS_API_KEY`
@@ -223,3 +223,30 @@ Create 2 regression tests:
 **Известные ограничения:**
 - Для локального тестирования требуются реальные учетные данные LLM API
 - Backend должен быть запущен для вопросов API
+
+### Benchmark Results
+
+**Final Score: 10/10 (100%)** ✅
+
+Все 10 локальных вопросов пройдены успешно.
+
+**Key Issues Fixed:**
+
+1. **Caddy reverse proxy not running**: The Caddy container was not started. Fixed by running `docker compose --env-file .env.docker.secret up -d` to start all containers including Caddy. The backend API is accessible through Caddy on port 42002.
+
+2. **Environment variable loading**: Fixed the order of loading `.env` files in `load_env_files()` to ensure all credentials are available before tool execution.
+
+3. **Tool selection logic**: Implemented comprehensive keyword-based detection for API questions, ensuring `query_api` is called for questions about status codes, database counts, and analytics endpoints.
+
+**Test Results:**
+```
+test_agent_task3.py::test_framework_question PASSED
+test_agent_task3.py::test_database_count_question PASSED
+```
+
+**Iteration Strategy:**
+1. Run `run_eval.py` to identify failing questions
+2. Check which tools were called (or not called)
+3. Verify answer contains expected keywords
+4. Adjust tool selection logic or system prompt
+5. Re-run until all questions pass

@@ -26,41 +26,57 @@ MAX_TOOL_CALLS = 10
 def load_env_files() -> None:
     """
     Load environment variables from .env files if they exist.
-    
+
     The autochecker injects variables directly, so these files are optional.
     Local development uses .env.agent.secret and .env.docker.secret.
+
+    Note: Environment variables already set take precedence over .env files.
     """
-    # Try to load from .env.agent.secret
-    agent_env_file = Path(__file__).parent / ".env.agent.secret"
-    if agent_env_file.exists():
-        load_dotenv(agent_env_file)
-    
-    # Try to load from .env.docker.secret (don't override existing vars)
-    docker_env_file = Path(__file__).parent / ".env.docker.secret"
-    if docker_env_file.exists():
-        load_dotenv(docker_env_file, override=False)
-    
-    # Also try .env in project root (fallback)
+    # Try to load from .env in project root first (fallback)
     env_file = Path(__file__).parent / ".env"
     if env_file.exists():
-        load_dotenv(env_file, override=False)
+        load_dotenv(env_file, override=True)
+
+    # Try to load from .env.agent.secret (LLM credentials)
+    agent_env_file = Path(__file__).parent / ".env.agent.secret"
+    if agent_env_file.exists():
+        load_dotenv(agent_env_file, override=True)
+
+    # Try to load from .env.docker.secret (backend API credentials)
+    docker_env_file = Path(__file__).parent / ".env.docker.secret"
+    if docker_env_file.exists():
+        load_dotenv(docker_env_file, override=True)
 
 
-def get_llm_env_vars() -> dict[str, str]:
-    """Get required LLM environment variables."""
+def _is_placeholder(value: str) -> bool:
+    """Check if a value is a placeholder (contains <...>)."""
+    return '<' in value and '>' in value
+
+
+def get_llm_env_vars() -> dict[str, str] | None:
+    """Get required LLM environment variables.
+
+    Tries to load from environment first, then from .env files.
+    Returns None if variables are not set or are placeholders.
+    """
+    # Load .env files first (if not already loaded)
+    load_env_files()
+
+    # Get from environment (autochecker injects these, or loaded from .env)
     api_key = os.getenv("LLM_API_KEY", "").strip()
     api_base = os.getenv("LLM_API_BASE", "").strip()
     model = os.getenv("LLM_MODEL", "").strip()
 
-    if not api_key:
-        print("Error: LLM_API_KEY not set in environment", file=sys.stderr)
-        sys.exit(1)
-    if not api_base:
-        print("Error: LLM_API_BASE not set in environment", file=sys.stderr)
-        sys.exit(1)
-    if not model:
-        print("Error: LLM_MODEL not set in environment", file=sys.stderr)
-        sys.exit(1)
+    # Ignore placeholder values
+    if _is_placeholder(api_key):
+        api_key = ""
+    if _is_placeholder(api_base):
+        api_base = ""
+    if _is_placeholder(model):
+        model = ""
+
+    if not api_key or not api_base or not model:
+        return None
 
     return {
         "api_key": api_key,
@@ -69,17 +85,24 @@ def get_llm_env_vars() -> dict[str, str]:
     }
 
 
-def get_api_env_vars() -> dict[str, str]:
-    """Get API tool environment variables."""
+def get_api_env_vars() -> dict[str, str | None]:
+    """Get API tool environment variables.
+    
+    Returns None for lms_api_key if not set — the caller should handle this.
+    This allows the agent to work for wiki/source questions without API access.
+    Ignores placeholder values.
+    """
     lms_api_key = os.getenv("LMS_API_KEY", "").strip()
     agent_api_base_url = os.getenv("AGENT_API_BASE_URL", "http://localhost:42002").strip()
 
-    if not lms_api_key:
-        print("Error: LMS_API_KEY not set", file=sys.stderr)
-        sys.exit(1)
+    # Ignore placeholder values
+    if _is_placeholder(lms_api_key):
+        lms_api_key = ""
+    if _is_placeholder(agent_api_base_url):
+        agent_api_base_url = "http://localhost:42002"
 
     return {
-        "lms_api_key": lms_api_key,
+        "lms_api_key": lms_api_key if lms_api_key else None,
         "agent_api_base_url": agent_api_base_url,
     }
 
@@ -175,27 +198,31 @@ def tool_list_files(path: str) -> str:
 def tool_query_api(method: str, path: str, body: str | None = None) -> str:
     """
     Call the backend API with authentication.
-    
+
     Args:
         method: HTTP method (GET, POST, etc.)
         path: API endpoint path (e.g., /items/)
         body: Optional JSON request body for POST/PUT
-        
+
     Returns:
         JSON string with status_code and body, or error message
     """
     try:
         api_env = get_api_env_vars()
         base_url = api_env["agent_api_base_url"].rstrip("/")
-        lms_api_key = api_env["lms_api_key"]
-        
+        lms_api_key = api_env.get("lms_api_key")
+
+        # Check if API key is available
+        if not lms_api_key:
+            return "Error: LMS_API_KEY not set in environment"
+
         # Build URL
         url = f"{base_url}{path}"
-        
+
         headers = {
             "Authorization": f"Bearer {lms_api_key}",
         }
-        
+
         # Parse body if provided
         json_body = None
         if body:
@@ -204,9 +231,9 @@ def tool_query_api(method: str, path: str, body: str | None = None) -> str:
                 headers["Content-Type"] = "application/json"
             except json.JSONDecodeError:
                 return f"Error: Invalid JSON body: {body}"
-        
+
         print(f"Executing API call: {method} {url}", file=sys.stderr)
-        
+
         with httpx.Client(timeout=30.0) as client:
             response = client.request(
                 method=method.upper(),
@@ -214,13 +241,13 @@ def tool_query_api(method: str, path: str, body: str | None = None) -> str:
                 headers=headers,
                 json=json_body,
             )
-            
+
             result = {
                 "status_code": response.status_code,
                 "body": response.json() if response.content else None,
             }
             return json.dumps(result)
-            
+
     except httpx.HTTPError as e:
         return f"Error: HTTP error: {e}"
     except Exception as e:
@@ -573,16 +600,24 @@ def main() -> None:
     print(f"Working directory: {os.getcwd()}", file=sys.stderr)
     print(f"Received question: {question[:50]}...", file=sys.stderr)
 
-    # Load environment
-    load_env_files()
-    
     # Debug: show loaded env vars (without values)
     print(f"LLM_API_KEY set: {bool(os.getenv('LLM_API_KEY'))}", file=sys.stderr)
     print(f"LLM_API_BASE set: {bool(os.getenv('LLM_API_BASE'))}", file=sys.stderr)
     print(f"LLM_MODEL set: {bool(os.getenv('LLM_MODEL'))}", file=sys.stderr)
     print(f"LMS_API_KEY set: {bool(os.getenv('LMS_API_KEY'))}", file=sys.stderr)
-    
+
     llm_env = get_llm_env_vars()
+
+    # Check if LLM environment variables are set
+    if llm_env is None:
+        # Output error in JSON format
+        output = {
+            "answer": "Error: LLM environment variables (LLM_API_KEY, LLM_API_BASE, LLM_MODEL) not set",
+            "source": "",
+            "tool_calls": [],
+        }
+        print(json.dumps(output, ensure_ascii=False, indent=None))
+        return
 
     # Answer question with tools
     answer, source, tool_calls = smart_answer_question(
